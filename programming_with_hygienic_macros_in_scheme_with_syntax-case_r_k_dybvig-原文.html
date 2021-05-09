@@ -1,0 +1,335 @@
+<!doctype html>
+
+<html><head><meta charset="utf-8">
+<title>Writing Hygienic Macros in Scheme with Syntax-Case</title>
+</head>
+<body>
+<center>
+<h2>Writing Hygienic Macros in Scheme with Syntax-Case</h2>
+<p>R. Kent Dybvig</p>
+<p>Indiana University Computer Science Department</p>
+<p>Bloomington, IN 47405</p>
+<p>dyb@cs.indiana.edu</p>
+<p>Copyright c 1992 R. Kent Dybvig</p>
+<p>August 1992</p>
+<p><b>Abstract</b></p></center>
+<p>This article describes a pattern-based hygienic macro system for Scheme and provides numerous examples of its use. Macros defined using this system are automatically <i>hygienic</i> and <i>referentially transparent</i>. Unlike earlier hygienic macro systems, this system does not require “low level” macros to be written in a different style from “high level” macros. In particular, automatic hygiene, referential transparency, and the ability to use patterns extend to all macro definitions, and there is never any need to explicitly manipulate syntactic environments of any kind. The macro system also supplies a hygiene-preserving mechanism for controlled variable capture, allowing macros to introduce implicit identifier bindings or references.</p>
+
+<h3>1 Introduction</h3>
+
+<p>This article describes a hygienic macro system for Scheme that is similar to the one documented in an appendix to the “Revised<sup>4</sup> Report on the Algorithmic Language Scheme” [2], with several important differences. Most importantly, there is no practical distinction in this system between “high level” and “low level” macros. Although some macros will not take advantage of the more primitive operators, there is no penalty in terms of loss of automatic hygiene, referential transparency, or ease-of-use for those macros that do. In particular, the same pattern matching facilities that were previously available only to high-level macros can now be used in any context. There is never any need to completely rewrite a macro originally written in a high-level style simply because it now requires access to some more primitive feature. Furthermore, there is never any need to explicitly manipulate syntactic environments of any kind.</p>
+<p>The macro system consists of a set of defining forms, a set of forms for taking apart and putting together syntax, and a set of primitives for manipulating and comparing identifiers. The system is based on a representation of expressions as abstract objects that are different from the commonly used Scheme (datum) representations. Macro transformers take syntax objects as input and return (expanded) syntax objects as output. Embedded within each syntax object is sufficient information to determine the bindings of all identifiers contained within the syntax object, along with an internal representation of the syntactic form itself. Other implementation-dependent information may be contained within a syntax object; for example, the position of the expression in the original source code may be included for debugging purposes.</p>
+<p>The next section of this article attempts to clearly define the terminology used and the syntactic forms and primitive operators supplied by the macro system (Section 2). The following section demonstrates through a series of examples how easy it is to write macros, ranging from simple to complex, using this system (Section 3). The reader may prefer to skip over Section 2 on first reading and return to it after working through some of the examples in Section 3. Although this is not intended to serve as a complete implementors’ guide, a theory of operation is given to help macro writers understand the expansion process (Section 4).</p>
+<p>In order to fully understand the examples in this article, it is necessary to have a good understanding of Scheme, and helpful but not necessary to have studied or used <b>extend-syntax</b> [5, 3] or the high-level system documented in the Revised<sup>4</sup> Report.</p>
+<p>This article is intended to instruct potential macro-system users how to use the system; there is no attempt at justification or comparison with other systems. A more formal treatment of this macro system and its implementation, along with background information on this and other macro systems is given in [4].</p>
+<p>A complete implementation of the macro system is available, and should run in any Scheme system with the provision of a few implementation-dependent “hooks.” It can be obtained via “anonymous ftp” from <i>moose.cs.indiana.edu</i> in the directory <i>pub/scheme/syntax-case.</i></p>
+<h3>2 Syntactic forms and primitives</h3>
+<p>New macros are defined to extend the set of syntactic forms available within a program or subprogram. All extended syntactic forms, also referred to as “macro calls,” take the form:</p>
+<img src="im/1.png" width="100%" />
+<p>where <i>keyword</i> is an identifier that names a macro. The syntax of <i>subform</i> is determined by the macro and can vary significantly from macro to macro. The mechanisms for establishing new keyword bindings and for writing macros are described in the remainder of this section. Extensive examples demonstrating the use of each of the features described in this section are given in the following section.</p>
+
+<p>Macros defined using these facilities are automatically <i>hygienic</i> [6]. If a macro transformer inserts a binding for an identifier (variable or keyword), the new binding will not capture other identifiers (even of the same name) introduced elsewhere. Macros defined using these facilities are also <i>referentially transparent</i> [1]. If a macro transformer inserts a free reference to an identifier, the reference refers to the binding that was visible where the transformer was specified, regardless of any local bindings that may surround the use of the macro. In order to maintain these two properties, bound identifiers introduced by macros are renamed, at least in effect, to avoid potential conflicts.</p>
+
+<p>Although this is almost always the desired behavior, it is sometimes desirable to insert identifiers into the output of a macro that behave as if they had been present in the original expression. That is, it is sometimes desirable for inserted identifiers to be bound (captured) by existing bindings or for inserted bindings to bind (capture) existing references. A mechanism for doing this in a controlled, hygiene-preserving manner is described at the end of this section.</p>
+
+<p>New syntactic forms are defined by associating an identifier, or <i>keyword</i> , with a transformation procedure, or <i>transformer</i> . At top level, syntactic definitions take the form of:</p>
+<img src="im/2.png" width="100%" />
+<p>The <i>transformer-expression</i> must be an expression that evaluates to a transformer. When the expander encounters an expression of the form (<i>keyword . subform</i> ), the expression is passed to the associated transformer for processing. The scope of syntactic definitions can be limited by using one of the lexical binding forms:</p>
+<img src="im/3.png" width="100%" />
+<p>In both of these forms the <i>keyword</i> denotes new syntax in <i>body</i>; in the case of <b>letrec-syntax</b> the binding scope also includes each <i>transformer-expression</i>.</p>
+
+<p>Lexical macro keyword bindings, ordinary lexical variable bindings, and pattern variable bindings (introduced below) can shadow each other, and any lexical binding shadows a top-level binding for the same identifier. Any <b>define-syntax</b> forms appearing within the definitions at the front of a <b>lambda</b> body (or other similar body) are treated as <b>letrec-syntax</b> bindings.</p>
+
+<p>Macro transformers are procedures of one argument. The argument to a macro transformer is a <i>syntax object</i>, which contains contextual information about an expression in addition to its structure. This contextual information enables the macro system to determine, for each identifier contained within the expression, to which binding the identifier refers. This information is required to maintain hygiene and referential transparency. This same information also allows macro transformers to compare identifiers according to their intended use as free identifiers, bound identifiers, or data. Syntax objects may contain other syntactic information that is not of direct interest to the macro writer. For example, syntax objects can contain source annotations that allow the evaluator to correlate the final object code with the source code that produced it.</p>
+
+<p>The output from a transformer may itself be a macro call or contain macro calls, in which case further expansion is performed until no macro calls remain.</p>
+
+<p>Transformers decompose their input using <b>syntax-case</b> and rebuild their output using <b>syntax</b>. A <b>syntax-case</b> expression takes the following form:</p>
+<img src="im/4.png" width="100%" />
+<p>Each <i>clause</i> takes one of the following two forms:</p>
+<img src="im/5.png" width="100%" />
+<p><b>syntax-case</b> first evaluates <i>input-expression</i>, then attempts to match the resulting value with the pattern from the first <i>clause</i>. This value is usually a syntax object, but it may be any Scheme list structure. If the value matches the pattern, and there is no <i>fender</i> present, <i>output-expression</i> is evaluated and its value returned as the value of the <b>syntax-case</b> expression. If the value does not match the pattern, the value is compared against the next clause, and so on. An error is signaled if the value does not match any of the patterns.</p>
+
+<p>Patterns consist of list structures, identifiers, and constants. Each identifier within a pattern is either a <i>literal</i>, a <i>pattern variable</i>, or the special identifier . . . , which represents an ellipsis. Any identifier other than . . . is a literal if it appears in the list of literals (<i>literal</i> . . . ) in the <b>syntax-case</b> expression; otherwise it is a pattern variable. Literals serve as auxiliary keywords, such as <b>else</b> in <b>case</b> and <b>cond</b> expressions. List structure within a pattern specifies the basic structure required of the input, pattern variables specify arbitrary substructure, and literals and constants specify atomic pieces that must match exactly. Ellipses specify repeated occurrences of the subpatterns they follow.</p>
+
+<p>An input form <i>F</i> matches a pattern <i>P</i> if and only if:</p>
+
+<p><i>P</i> is a pattern variable; </p>
+<p><i>P</i> is a literal identifier and <i>F</i> is an identifier with the same binding; or  </p>
+<p><i>P</i> is a pattern list (<i>P</i><sub>1</sub> . . . <i>P</i><sub>n</sub> ) and <i>F</i> is a list of n forms that match <i>P</i><sub>1</sub> through <i>P</i><sub>n</sub> , respectively; or  </p>
+<p> <i>P</i> is an improper pattern list (<i>P</i><sub>1</sub>  <i>P</i><sub>2</sub>  . . . <i>P</i><sub>n</sub>  . <i>P</i><sub>n+1</sub> ) and <i>F</i> is a list or improper list of n or more forms that match <i>P</i><sub>1</sub>  through <i>P</i><sub>n</sub>  , respectively, and whose nth “cdr” matches <i>P</i><sub>n+1</sub>  ; or  </p>
+<p><i>P</i> is of the form (<i>P</i><sub>1</sub> . . . <i>P</i><sub>n</sub> <i>P</i><sub>n+1</sub> <i>ellipsis</i> ) where <i>ellipsis</i> is the identifier . . . and <i>F</i> is a proper list of at least <i>n</i> elements, the first <i>n</i> of which match <i>P</i><sub>1</sub> through <i>P</i><sub>n</sub> , respectively, and each remaining element of <i>F</i> matches <i>P</i><sub>n+1</sub> ; or  </p>
+<p><i>P</i> is a pattern datum and <i>F</i> is equal to <i>P</i> in the sense of the <i>equal?</i> procedure.</p>
+
+<p>If the optional <i>fender</i> is present, it serves as an additional constraint on acceptance of a clause. If the value of <i>input-expression</i> matches the pattern for a given clause, the corresponding <i>fender</i> is evaluated. If <i>fender</i> evaluates to a true value the clause is accepted, otherwise the clause is rejected as if the input had failed to match the pattern. Fenders are logically a part of the matching process, i.e., they specify additional matching constraints beyond the basic structure of an expression.</p>
+
+<p>Pattern variables contained within a clause’s <i>pattern</i> are bound to the corresponding pieces of the input value within the clause’s <i>fender</i> (if present) and <i>output-expression</i>. Although pattern variable bindings created by <b>syntax-case</b> can shadow (and be shadowed by) lexical and macro keyword bindings, pattern variables can be referenced only within <b>syntax</b> expressions. Scheme <b>syntax</b> expressions have the following form:</p>
+<img src="im/6.png" width="100%" />
+<p>A <b>syntax</b> form returns a Scheme object in much the same way as <b>quote</b> or <b>quasiquote</b>, with two important differences: the values of pattern variables appearing within <i>template</i> are inserted into <i>template</i>, and contextual syntactic information contained within <i>template</i> is retained. All list structure within <i>template</i> remains ordinary list structure in the output, and all other items (including identifiers) are inserted without further interpretation. Contextual information associated with the values of inserted pattern variables and any nonlist items from the template is retained in the output.</p>
+
+<p>Within a template, a subtemplate followed by an ellipsis expands into zero or more occurrences of the subtemplate. The subtemplate must contain at least one pattern variable that was in a subpattern followed by an ellipsis in the input. (Otherwise, the expander could not determine how many times the subform should be repeated in the output.) This generalizes in a natural way to nested ellipses. There is one exception to this rule: the special template ( . . . . . . ) expands into . . . . This is used by macro-defining macros to introduce ellipses into the defined macros.</p>
+
+<p>A pattern variable that occurs in a <b>syntax</b> template is replaced by the subform it matched in the <b>syntax-case</b> expression that established the pattern variable’s binding. Pattern variables that occur in subpatterns followed by one or more ellipses may occur only in subtemplates that are followed by (at least) as many ellipses in a <b>syntax</b> template, in which case they are replaced in the output by all of the subforms they matched in the input.</p>
+
+<p>It is an error for a transformer to return a “raw” symbol; all names returned by a transformer must be identifiers introduced by <b>syntax</b> expressions. In other words, if a transformer returns a symbol, the behavior is undefined.</p>
+
+<p>The system provides three predicates for recognizing and comparing identifiers(The term identifier is used throughout as shorthand for “syntax object representing an identifier.”): <i>identifier?</i>, <i>free-identifier=?</i>, and <i>bound-identifier=?</i>. The predicate <i>identifier?</i> returns true if and only if its argument is an identifier.</p>
+
+<p>The predicates <i>free-identifier=?</i> and <i>bound-identifier=?</i> are used to determine whether two identifiers are equal based on their <i>intended</i> use as free or bound identifiers in the output of a macro. When it is necessary to determine if a binding introduced for one identifier would bind references to another, the predicate <i>bound-identifier=?</i> is used. Two identifiers are <i>bound-identifier=?</i> only if both have the same name and both were present in the original program or both were introduced by the same macro application. The predicate <i>bound-identifier=?</i> can be used for detecting duplicate variable names in a binding construct, or for other preprocessing of a binding construct that requires detecting instances of the bound variables. When it is necessary to determine if two identifiers, inserted as free references, would both refer to the same binding, the predicate <i>free-identifier=?</i> is used. Literal identifiers appearing in <b>syntax-case</b> patterns (such as <b>else</b> in <b>cond</b>) are matched using <i>free-identifier=?</i>.</p>
+
+<p>Two identifiers may be <i>free-identifier=?</i> if they are not <i>bound-identifier=?</i>, but the converse is never true. In general, when two identifiers are introduced at different macro expansion steps but both would refer to the same binding if inserted as free references, they are <i>free-identifier=?</i> but not <i>bound-identifier=?</i>.</p>
+
+<p>On rare occasions, it is necessary to compare two identifiers that will be inserted as symbolic (quoted) data in the output of a macro. No predicate for directly comparing two identifiers that will be used as symbolic data is provided; however, it is simple to define one in terms of <i>syntax-object >datum</i>, which extracts the “raw” datum from any syntax object:</p>
+<img src="im/7.png" width="100%" />
+<p>It is never necessary to generate a single unique name for insertion in the output of a macro, as is often necessary in nonhygienic systems, since inserted bindings are, in effect, renamed as necessary. However, it is sometimes convenient to be able to create a list of temporary names. The procedure <i>generate-temporaries</i> is used for this purpose. This procedure takes a list as input and returns a list of new identifiers, one for each element in the input list. The actual elements of the input list are ignored. Typically, the list passed to generate-temporaries is a list of subforms from the input to a macro where the number of subforms determines the number of temporaries required. (See the <b>letrec</b> example in the next section.)</p>
+
+<p>Occasionally it is useful to define macros that introduce visible bindings for identifiers that are not supplied explicitly in a macro call. For example, we might wish to define a <b>loop</b> macro that binds the implicit variable exit to an escape procedure within the loop body. This can be done using the procedure <i>implicit-identifier</i>. The procedure <i>implicit-identifier</i>, given a <i>template identifier</i> and a <i>symbol</i> as arguments, creates an identifier named by the symbol that behaves as if it had been introduced at the same time and place as the template identifier. The template identifier is often the macro keyword itself, extracted from the input, and the symbol is the symbolic name of the identifier to be constructed. Section 3 presents several examples using <i>implicit-identifier</i>.</p>
+
+<p>Many syntax errors are reported automatically by <b>syntax-case</b> when none of the clauses are selected. Sometimes, however, the error messages produced are misleading (for example, if <b>syntax-case</b> is applied to only a portion of the input) or less informative than desired. The procedure <i>syntax-error</i> can be used to signal an error explicitly. This procedure accepts one or more arguments: the first argument is a syntax object (which is always stripped of all syntactic information for readability), and the remaining arguments are strings describing the error. If no string arguments are supplied, a default message such as “invalid syntax” is printed along with the stripped first argument.</p>
+
+<h3>3 Examples</h3>
+<p>This section contains a sequence of annotated example macro definitions, beginning with a few simple macros and graduating to more complex macros. Each of the syntactic forms and procedures described in the preceding section are demonstrated, most more than once. Many of the examples define standard Revised<sup>4</sup> Report derived syntactic forms under the assumption that the reader is already familiar with their syntax and semantics.</p>
+
+<p>Within the code, syntactic keywords appear in boldface, e.g., <b>lambda</b>; lexical variables, toplevel variables, and pattern variables appear in italics, e.g., <i>x</i>; and comments and constants appear in Roman, e.g., “okay”.</p>
+
+<p>The first example is a very simple macro for a two-subexpression variant <b>and2</b> of the standard syntactic form <b>and</b>.</p>
+<img src="im/8.png" width="100%" />
+<p>The <b>define-syntax</b> expression establishes a binding for the <b>and2</b> keyword to the specified transformer. The syntax object provided as input to the transformer is handed to <b>syntax-case</b>; ultimately, almost nothing can be done with syntax objects except by way of <b>syntax-case</b>. The syntax-case expression contains only one clause. The input pattern, (_ <i>x y</i> ), specifies that, in addition to the macro keyword, this form requires exactly two subexpressions and that the pattern variables <i>x</i> and <i>y</i> are to be bound to the corresponding pieces of the input. The output expression simply returns a new expression defined in terms of these pattern variable.</p>
+
+<p>There are three things worth noting even in this simple example. First, output generated by macros is generated, directly or indirectly, by <b>syntax</b> forms. The <b>syntax</b> form serves two purposes: it expands pattern variables into the corresponding subforms of the input, and it retains information regarding lexical variable bindings and other contextual information with the output form. In this example, this contextual information helps determine that the <b>if</b> in the output refers to the toplevel binding for <b>if</b> and not to some other binding for <b>if</b>. If, on the other hand, there were a local binding for <b>if</b> visible where this macro was defined, the contextual information would ensure that <b>if</b> referred to that local binding and not to the top-level binding (or any other binding).</p>
+
+<p>Second, the pattern variable <i>x</i> appearing in the input pattern shadows the lexical variable <i>x</i> bound by the enclosing lambda expression. If <i>x</i> were referenced within the output expression but outside of the <i>syntax</i> form, it would be an error. It is always possible to locate the binding for an identifier by tracing outwards to find the nearest enclosing binding form that binds the identifier; if no such form exists, the identifier refers to a top-level binding. Local binding forms include <b>lambda</b>, <b>let</b>, <b>letrec</b>, <b>do</b>, <b>let-syntax</b>, <b>letrec-syntax</b>, internal <b>define</b> and <b>define-syntax</b>, <b>syntax-case</b>, and any macro that expands into one of these forms.</p>
+<p>Third, the pattern variable underscore (_) is used in this example and throughout most of the examples where the macro keyword will appear in the input expression. This is a convention only; any pattern variable may be used here, including the name of the macro itself. This convention helps to remind the macro writer and anyone who reads the code that the keyword position never fails to contain the expected keyword and need not be matched. This convention can also help avoid confusion when defining local macros with <b>let-syntax</b>. (See the discussion surrounding the local <b>if</b> examples that appear later in this section.)</p>
+<p>The next two examples, defining the <b>when</b> and <b>unless</b> forms found in many Scheme implementations, demonstrate the use of ellipses for specifying multiple subforms:</p>
+<img src="im/9.png" width="100%" />
+<p>In both cases, the expansions clearly show what <b>when</b> and <b>unless</b> are intended to do: <b>when</b> evaluates the test expression <i>e0</i> and, if it evaluates to true, returns the result of evaluating the remaining subforms in sequence. The sense of the test is reversed in the <b>unless</b> form, which also demonstrates that the output of one macro may be defined in terms of another. Both require at least one subexpression, <i>e1</i>, following the test expression, and zero or more additional forms, <i>e2</i> . . . .</p>
+<p>A <b>when</b> form expands into references to the macro keywords <b>if</b> and <b>begin</b>, and an <b>unless</b> form expands into references to the macro keyword <b>when</b> and to the variable <i>not</i>. In a nonhygienic system, local bindings for any of these identifiers in the context of a <b>when</b> or <b>unless</b> expression could alter the semantics of the construct. With the definitions above, however, this is not a problem, so the following expressions both print “win” as desired:</p>
+<img src="im/10.png" width="100%" />
+<p>Either of these macros might just as easily have been defined as local macros using <b>let-syntax</b> or <b>letrec-syntax</b>. For example:</p>
+<img src="im/11.png" width="100%" />
+<p>In this case, it does not matter which of <b>let-syntax</b> or <b>letrec-syntax</b> is used, since the macro keyword <b>when</b> does not appear within the transformer expression. The choice is important in the following recursively-defined macro for <b>and</b> generalized to zero or more subforms:</p>
+<img src="im/12.png" width="100%" />
+<img src="im/13.png" width="100%" />
+<p>The second clause defines the base case for the recursion (one subexpression), and the third clause defines the recursive case (two or more subexpressions). The first clause specifies what happens when there are no subexpressions. During the expansion for (<b>and</b> <i>x y z</i> ) we would expect to have the following intermediate and final forms:</p>
+<img src="im/14.png" width="100%" />
+<p>Since the macro for <b>and</b> is recursive, it must be defined using <b>define-syntax</b> or <b>letrec-syntax</b> but not <b>let-syntax</b>. With <b>let-syntax</b>, the <b>and</b> in the output of the third clause would refer to the top-level definition for <b>and</b>. (Of course, if you try this in your Scheme system, it will probably appear to work since and is defined at top-level to do exactly the same thing. Try using <b>let-syntax</b> but with a different name, say <b>myand</b>, to see what happens.)</p>
+<p>The macros defined so far have not introduced any new bindings. The following definition for <b>or</b> does:</p>
+<img src="im/15.png" width="100%" />
+<p>An <b>or</b> expression must return the value of the first subexpression that evaluates to a true (nonfalse) value, or #f if none evaluate to true (or if there are none). If there is more than one subexpression, it must both test the value of the first subexpression by placing it in the test part of an <b>if</b> expression, and return its value if it does evaluate to a true value. In order to avoid evaluating the expression twice, a temporary variable <i>t</i> is introduced. Because the system maintains hygiene automatically, this binding is visible only to code introduced by the macro and not to code contained within the input to the macro. Thus, the following correctly evaluates to “okay”, although without automatic hygiene it would evaluate to #f since the reference to <i>t</i> in the second subexpression would be captured by the introduced binding for <i>t</i>.</p>
+<img src="im/16.png" width="100%" />
+<p>It is useful to think of the bound variable as being automatically renamed to avoid conflicts, which is in fact how an implementation might work. Thus, the final output of the expander might look something like:</p>
+<img src="im/17.png" width="100%" />
+<p>where <i>g0001</i> and <i>g0002</i> are generated names. (For debugging purposes, the actual output would likely include the original names as well, or these might be recorded in a separate table provided to the compiler or system debugger.) See Section 4 for more information on and examples of the expansion process.</p>
+<p>Identifiers bound by introduced bindings need not be new identifiers inserted by the macro, but may be identifiers extracted from the input to the macro. For example, if (unnamed) <b>let</b> were not provided by the system, it could be defined simply as follows:</p>
+<img src="im/18.png" width="100%" />
+<p>(This is the first in a series of <b>let</b> definitions, hence the subscript.) This example also demonstrates that patterns can contain more than one ellipsis and that the subpattern preceding an ellipsis can be a structured pattern containing one or more pattern variables. It also shows that pieces of such a pattern can be split up in the output, as are <i>i</i> and <i>v</i>, which appear together in the input and separate in the output.</p>
+<p>A definition for <b>let</b> that includes named <b>let</b> is given below:</p>
+<img src="im/19.png" width="100%" />
+<p>The first clause is identical to the version above; the second clause defines the named <b>let</b> form in terms of <b>letrec</b>. The order of the two clauses is important. A named <b>let</b> cannot match the first clause since ((<i>i v</i> ) . . . ) cannot match an identifier. However, if the clauses were reversed, some unnamed <b>let</b> expressions would match the named <b>let</b> clause, since the pattern variable name matches anything.</p>
+<p>To avoid this problem, we could introduce a fender to “fend off” unwanted matches:</p>
+<img src="im/20.png" width="100%" />
+<img src="im/21.png" width="100%" />
+<p>The fender here uses the <i>identifier?</i> predicate to ensure that <i>name</i> is an identifier. The <b>syntax</b> wrapped around <i>name</i> is necessary even in a fender, as it is anywhere pattern variables are referenced, and arbitrary <b>syntax</b> forms may be used within the fender, just as they can be within the output expression.</p>
+<p>The definitions above produce correct output when handed correct input, and they automatically check (via <b>syntax-case</b>) for basic structural errors in the input. However, they do not ensure that the bound identifiers are indeed identifiers. The following version uses a local help function called from within the fenders to perform this check:</p>
+<img src="im/22.png" width="100%" />
+<p>These fenders successfully reject input expressions that do not have identifiers where they are expected, but the resulting error message reported will not say why the input was rejected. We can refine the macro to do so by moving the test into the output expression and calling <i>syntax-error</i> directly:</p>
+<img src="im/23.png" width="100%" />
+<img src="im/24.png" width="100%" />
+<p>The check to make sure <i>name</i> is an identifier is left as a fender in the last clause, since failure of that test may be due to a more general syntax error, e.g.:</p>
+<img src="im/25.png" width="100%" />
+<p>Now suppose we are handed a form containing duplicate bound identifiers:</p>
+<img src="im/26.png" width="100%" />
+<p>The following version checks for this condition as well:</p>
+<img src="im/27.png" width="100%" />
+<p>Using <i>bound-identifier=?</i> allows <b>let</b> to reject only those forms that would result in a conflict. If the definition were to employ <i>free-identifier=?</i> instead, the following correct program would be rejected:</p>
+<img src="im/28.png" width="100%" />
+<p>Although the macro call (<b>f</b> <i>b</i>) apparently expands into (<b>let</b> ((<i>b</i> 1) (b 2)) (+ <i>b b</i>)), this program is actually correct because the introduced identifier b is renamed to avoid any such conflicts. However, since both occurrences of <i>b</i>, if left as free references, would refer to the same (top-level) binding for <i>b</i>, <i>free-identifier=?</i> would not distinguish them. Since the intended use in this case is as bound variables, the predicate <i>bound-identifier=?</i> is used instead.</p>
+<p>This sequence of <b>let</b> definitions ends with the following version of <b>let</b> that allows the value expressions to be “implicit begin” expressions:</p>
+<img src="im/29.png" width="100%" />
+<p>Although <b>let</b><sub>7</sub> is not a particularly useful construct since the order of evaluation of <b>lambda</b> arguments (and <b>let</b> value expressions) is unspecified, this example does serve to illustrate the use of nested ellipses.</p>
+<p>Some of the <b>let</b> examples above employ help procedures bound named by locally-bound identifiers, and virtually all transformers refer to their arguments. These identifier bindings must be available for reference at expansion time in order for this to work. The bindings for some identifiers are established at expansion time, while others are not established until run time. Run-time identifiers may not be used within transformers (except within <b>syntax</b> expressions), and references to expansion-time identifiers must not appear in the output of a transformer. The following expression should produce an “invalid reference” error:</p>
+<img src="im/30.png" width="100%" />
+<p>This is an error because the transformer, which runs at expansion time, attempts to reference the identifier <i>x</i>, which is not bound until run time. The following example should also produce an invalid reference error:</p>
+<img src="im/31.png" width="100%" />
+<p>This is because the transformer expands into a (run-time) reference to the variable <i>y</i>, which is available only at expansion time.</p>
+<p>It is not always an error for an identifier with an expansion-time binding to be inserted into the output of a transformer, since it is not an error to use it as as symbolic data or as a bound identifier. The following example is similar to the preceding one, except that the inserted identifier ends up being used as symbolic data:</p>
+<img src="im/32.png" width="100%" />
+<p>This expands into (<b>quote</b> y) and evaluates to <i>y</i>. Naturally, <b>quote</b> need not appear explicitly in the example above as long as the output ultimately expands into a <b>quote</b> expression containing <i>y</i>. In general, therefore, this kind of error is not detected until the identifier’s role is determined, which may happen long after the transformer has returned.</p>
+<p>Sometimes it is useful to create pattern variable bindings to hold intermediate output within the body of a macro. For this purpose, we can define a local binding operator for pattern variables similar to <b>let</b> for ordinary variables. The <b>with-syntax</b> form defined below expands into a <b>syntax-case</b> expression with a single clause:</p>
+<img src="im/33.png" width="100%" />
+<p>The following definition for <b>or</b> uses <b>with-syntax</b> in its third clause to build up a piece of its output separately from the whole:</p>
+<img src="im/34.png" width="100%" />
+<p>The definition for <b>do</b> below shows a more realistic use for <b>with-syntax</b>:</p>
+<img src="im/35.png" width="100%" />
+<img src="im/36.png" width="100%" />
+<p>This definition is ungraceful, but then so is <b>do</b> with its optional steps and optional return-value expressions.</p>
+<p>The <b>with-syntax</b> form can also be used to bind pattern variables to output from help functions, as in the definition for <b>letrec</b> below:</p>
+<img src="im/37.png" width="100%" />
+<p>The <b>cond</b> syntactic form is one of the most complex built-in forms, yet to come up with a macro for cond that works is not terribly difficult. We show here a series of definitions of cond each with different properties.</p>
+<p>Here is the first and simplest definition in the series:</p>
+<img src="im/38.png" width="100%" />
+<p>Notice the appearance of <b>else</b> and => in the literals list. This informs <b>syntax-case</b> that when these identifiers appear in the pattern, they are literals rather than pattern variables. The order of the clauses in this definition is important, although some rearrangement could be done. In general, more specific patterns must appear before more general patterns that might also match the same input, so the (_ (<b>else</b> <i>e1 e2</i> . . . ) . . . ) pattern must appear before the (_ (<i>e0 e1 e2</i> ) . . . ) pattern, and the patterns that check for => must appear before the last two patterns.</p>
+<p>The output of the second clause could simply be (<b>syntax</b> <i>e0</i> ):</p>
+<img src="im/39.png" width="100%" />
+<p>However, we choose to use the more complicated form to avoid specifying a return result when <i>e0</i> evaluates to false. Instead, the (implementation-dependent) value is determined by the else-less <b>if</b> expression.</p>
+<p>The output of the third clause above could be written in terms of <b>or</b>, though we choose not to for consistency with the preceding clause.</p>
+<img src="im/40.png" width="100%" />
+<p>The next version of <b>cond</b> shows how <i>free-identifier=?</i> could be used in place of the <b>syntax-case</b> literals list. It also provides a good example of the use of fenders:</p>
+<img src="im/41.png" width="100%" />
+<p>There is nothing wrong with the output from either of the two versions of <b>cond</b> above, but because of their recursive nature, it is possible to get a slightly strange error message when some clause other than the first is malformed. For example, the syntax error reported when the input is (<b>cond</b> (<i>x</i> ) (<i>y . z</i> )) might be:</p>
+<img src="im/42.png" width="100%" />
+<p>The following example of cond is more complex than the previous two because it recurs internally so that it always has a handle on the original input expression. It also contains an explicit error clause in which it calls <i>syntax-error</i> directly. It uses <b>with-syntax</b>, which was defined earlier.</p>
+<img src="im/43.png" width="100%" />
+<p>The versions of <b>cond</b> shown so far all have two cases for most of the types of clauses, one for when there are no subsequent clauses and one for when there are subsequent clauses. This is necessary since the obvious “base” case for the recursion, (<b>cond</b>), is invalid syntax. The next three examples commonize the various clauses by determining the “tail” of the generated <b>if</b> expression before constructing the output; this tail is either empty or contains one subexpression, so that the generated <b>if</b> expressions contain an else part only if there are more clauses.</p>
+<p>The first of this set of definitions uses a local help function, <i>cond-if-tail</i>, to construct the <b>if</b> tail:</p>
+<img src="im/44.png" width="100%" />
+<p>The next version constructs the tail before even looking at the current clause, and uses simplified patterns to be matched only against the current clause. Since it does use a simplified pattern, it must generate an error explicitly to make it clear that the error is caused by a malformed <b>cond</b> expression.</p>
+<img src="im/45.png" width="100%" />
+<p>If the explicit error clause were omitted, (<b>cond</b> (<i>x</i> ) (<i>y . z</i> )) would cause the error system to report an error something like:</p>
+<img src="im/46.png" width="100%" />
+<p>However, just as in the first two versions of <b>cond</b>, the syntax error in (<b>cond</b> (<i>x</i> ) (<i>y . z</i> )) would still be reported as an error in (<b>cond</b> (<i>y . z</i> )). The version below combines the techniques from the preceding version and the earlier version that recurs internally to get this right:</p>
+<img src="im/47.png" width="100%" />
+<img src="im/48.png" width="100%" />
+<p>The final definition of <b>cond</b> below expands into a pair of mutually recursive local macros that perform the expansion. Although it works and even reports errors in terms of the original <b>cond</b> expression, it is not as straightforward as the previous definitions. Furthermore, it is likely to be much less efficient than the previous versions, since it requires two new macro transformers to be constructed and evaluated each time a <b>cond</b> expression occurs in a program. It does, however, demonstrate how local macro definitions may be inserted into the output of a macro to perform additional complex processing of the input.</p>
+<img src="im/49.png" width="100%" />
+<p>The ( . . . . . . ) “escape” is used to introduce ellipses into the generated macros. The <b>be-like-begin</b> macro definitions shown later in this section provide a simpler demonstration of this feature.</p>
+<p>A local macro may be written in terms of an existing syntactic form or procedure of the same name using <b>let-syntax</b>, although it is somewhat tricky to do so and not usually a good idea. The following shows how one might restrict <b>if</b> expressions within a given expression to require the “else” (alternative) part:</p>
+<img src="im/50.png" width="100%" />
+<p>The expression above evaluates to 2. If, however, the body were (<b>if</b> 1 2), a syntax error would result.</p>
+<p>Although the definition above looks simple enough, there are several ways in which an attempt to write this macro could easily have gone wrong. First, it would not work if <b>letrec-syntax</b> were used instead of <b>let-syntax</b>. In this case, the identifier <b>if</b> inserted into the local macro’s output would refer to the local <b>if</b>, rather than the top-level <b>if</b>, and expansion would loop indefinitely. Next, if the definition were specified as in the following:</p>
+<img src="im/51.png" width="100%" />
+<p>expansion would again loop indefinitely. The reason is that the identifier <b>if</b> appearing at the start of the pattern is treated as a pattern variable, even though it is within the definition for the keyword <b>if</b>. Thus, it is bound to the corresponding identifier <b>if</b> from the input expression, which denotes the local binding of <b>if</b>. Finally, placing <b>if</b> in the list of literals in an attempt to patch up the latter version would not work either:</p>
+<img src="im/52.png" width="100%" />
+<p>This would cause <b>syntax-case</b> to compare the literal <b>if</b> in the pattern, which is scoped outside of the <b>let-syntax</b> expression, with the <b>if</b> in the input expression, which is scoped inside the <b>let-syntax</b>. Since they do not refer to the same binding, they are not <i>free-identifier=?</i>. The result is a syntax error.</p>
+<p>The conventional use of _ in place of the macro keyword helps the macro writer to avoid situations like those above where the wrong identifier is matched against or inserted by accident. What if a local macro must be defined in terms of an existing binding for the macro keyword, but the local macro must be defined recursively? This could be done by using an internal recursion similar to that used in some of the <b>let</b> and <b>cond</b> examples above. But it can also be done by observing that the problem with the second <b>if</b> example above can actually be used to advantage. The following local definition for <b>if</b> is a more general form that allows zero or more test/consequent pairs possibly followed by an alternative:</p>
+<img src="im/53.png" width="100%" />
+<p>Here we use a pattern variable <i>p</i> to pick up the identifier <b>if</b> from the input that carries with it the local binding for <b>if</b> so that we can use it in the recursion step. Thus, when we refer to <b>if</b> in the output, it is the top-level <b>if</b>, but when we refer to <i>p</i>, it is the local <b>if</b>.</p>
+<p>Although this works, the best solution is to name the local macro something different from the top-level macro and to use <b>letrec-syntax</b> to support the recursion.</p>
+<p>The macro appendix of the Revised<sup>4</sup> Report on Scheme provides a <b>syntax-rules</b> form that is a restricted variant of <b>syntax-case</b>. Here is how it can be defined in terms of <b>syntax-case</b>:</p>
+<img src="im/54.png" width="100%" />
+<p><b>syntax-rules</b> differs from <b>syntax-case</b> in three ways. First, <b>syntax-rules</b> must itself evaluate to a transformer (procedure), so it expands into a <b>lambda</b> expression. Second, <b>syntax-rules</b> does not support fenders. Third, the output part of a <b>syntax-rules</b> clause is always a <b>syntax</b> template rather than an arbitrary expression, so it expands into a <b>syntax</b> form. Many of the macros above can be written using <b>syntax-rules</b> but only if they can be written with simple input-pattern/output-template clauses. This definition of <b>or</b> is a good example:</p>
+<img src="im/55.png" width="100%" />
+<p>Actually, to be completely correct, we must ignore the first position of each pattern as specified by the Revised<sup>4</sup> Report, for the same reasons we stated earlier for our convention of using _ in the first position of patterns matched against macro calls. We do so in the next definition by inserting a set of dummy pattern variables:</p>
+<img src="im/56.png" width="100%" />
+<p>Many versions of Scheme provide a version of <b>extend-syntax</b> [5, 3], which is one of the forerunners to the system described in this article. It too can be defined in terms of <b>syntax-case</b> if we are willing to use <b>syntax</b> in place of <b>quote</b> to mark pieces of fenders and “with” clauses that are to be expanded by the template expander. The first version below shows <b>extend-syntax</b> without <b>with</b> forms, and the second allows <b>with</b> forms (but only at the beginning of the output template).</p>
+<img src="im/57.png" width="100%" />
+<img src="im/58.png" width="100%" />
+<p>Using the latter version of <b>extend-syntax</b>, <b>letrec</b> can be defined as follows:</p>
+<img src="im/59.png" width="100%" />
+<p>Many of the macro definitions given earlier would be shorter using <b>syntax-rules</b>, and shorter still using extend-syntax. Which to use is really a matter of taste.</p>
+<p>The next few examples involve the insertion of implicit identifiers into the output of a macro. The first of these defines a loop macro that implicitly binds the variable <i>exit</i> to a continuation within the body of the loop:</p>
+<img src="im/60.png" width="100%" />
+<p>Using this definition, the expression (<b>loop</b> 1) loops indefinitely, but:</p>
+<img src="im/61.png" width="100%" />
+<p>terminates on the third iteration. Also:</p>
+<img src="im/62.png" width="100%" />
+<p>terminates and returns 0, but:</p>
+<img src="im/63.png" width="100%" />
+<p>does not terminate.</p>
+<p>In order to create a binding that captures references to <i>exit</i> within the loop, we create an implicit identifier using the macro’s keyword as a template. An implicit identifier is one that behaves as if it had been introduced at the same time and in the same place as the template identifier, in this case the keyword in the macro call. It is as if the implicit identifier had been part of the original macro call and had been plucked from the input rather than synthesized by <i>implicit-identifier</i>.</p>
+<p>The binding introduced for <i>exit</i> might just as well be a macro binding:</p>
+<img src="im/64.png" width="100%" />
+<p>All of the examples given above behave the same with either definition of <b>loop</b>, and in fact, the generated code would be nearly identical.</p>
+<p>Another common use for implicit identifiers is in the definition of structure facilities. The following definition for <b>define-structure</b> is an adaptation of one that appeared in <i>The Scheme Programming Language</i> [3]. This system represents structures as vectors of length <i>n</i> + 1, where n is the number of fields, the first element is the name of the structure, and the remaining elements contain the fields’ values. A structure definition expands into a <b>begin</b> containing a sequence of procedure definitions for a constructor, a structure “type” predicate, and access and assignment procedures for each field.</p>
+<p>The names for these procedures are constructed as implicit identifiers from the name given for the structure and the field names. Most of the work is done in the local help procedure <i>construct-name</i>. This procedure takes a template identifier and a list of identifiers and strings to be used in forming the implicit identifier’s name.</p>
+<img src="im/65.png" width="100%" />
+<img src="im/66.png" width="100%" />
+<p>Notice the choice of template identifier in each call to <i>construct-name</i>. For the constructor and predicate identifiers, the structure name is used, and for the access and assignment procedure identifiers, the corresponding field name is used. These are the most logical choices, although there is no difference except for <b>define-structure</b> macro calls that are built up incrementally.</p> 
+<p>Any of the generated procedure definitions could easily have been macro definitions instead. For example, to define the accessors as macros, it would be necessary only to replace:</p>
+<img src="im/67.png" width="100%" />
+<p>with:</p>
+<img src="im/68.png" width="100%" />
+<p>Using either version, a <b>define-structure</b> form may appear anywhere a <b>define</b> or <b>define-syntax</b> form may appear, including within a sequence of definitions at the front of a <b>lambda</b> or similar body.</p>
+<p>The following definition defines <b>quasiquote</b>; it is more complicated than necessary because it attempts to minimize the amount of consing. Although there are no new concepts introduced by the example, it is a good example of a macro that traverses the entire input expression rather than just its top-level structure. A much simpler version could be defined by replacing calls to <i>gen-cons</i>, <i>gen-append</i>, and <i>gen-vector</i> with syntax for calls to <i>cons</i>, <i>append</i>, and <i>list->vector</i>.</p>
+<img src="im/69.png" width="100%" />
+<img src="im/70.png" width="100%" />
+<p>As with references to <i>not</i> inserted by the <b>unless</b> transformer defined earlier, the inserted references to <i>cons</i>, <i>list</i>, and other primitive names resolve to the top-level bindings even if other bindings for these names are lexically apparent within the scope of a <b>quasiquote</b> expression:</p>
+<img src="im/71.png" width="100%" />
+<p>The final example of this section shows how a macro generating another macro can include ellipses in the generated macro using the “escape sequence” ( . . . . . . ):</p>
+<img src="im/72.png" width="100%" />
+<p>Following this, (<b>be-like-begin sequence</b>) would allow <b>sequence</b> to be used interchangeably with <b>begin</b>.</p>
+<p>If there are many ellipses in the generated macro, it may be preferable to bind a local pattern variable to ( . . . . . . ) and to use this variable in place of the ( . . . . . . ) in the definition:</p>
+<img src="im/73.png" width="100%" />
+<h3>4 Theory of operation</h3>
+<p>Implementation of the macro system is surprisingly straightforward. In this section we briefly describe how our implementation works. Other strategies may be possible.</p>
+
+<p>Implementing the basic macro expansion algorithm is a procedure called the <i>expander</i>, which is called before compilation of each expression entered from the keyboard or loaded from a source file. The expander traverses the input expression, expanding any macros it encounters and handling core forms such as <b>lambda</b>, <b>if</b>, and <b>quote</b>. The expander maintains a lexical compile-time environment that contains information about lexically visible identifiers: macro keywords, lexical variable names, and pattern variable names. As the expander enters the scope of a lexical binding construct such as <b>lambda</b>, <b>syntax-case</b>, or <b>letrec-syntax</b>, the compile time environment is augmented with information about the new bindings. Upon leaving the scope, this information is dropped. For macro keywords, the lexical compile-time environment holds the associated transformers. For pattern variable names, it holds the nesting depths, i.e., the number of levels of nested ellipses by which the pattern variable was followed. For lexical variable names, it records nothing more than their existence.</p>
+
+<p>Since identifier bindings may shadow enclosing identifier bindings, only the most recently encountered binding of any type is relevant during expansion. A top-level compile-time environment is maintained as well to hold bindings from top-level macro keywords to the associated transformers. An identifier binding in the top-level compile-time environment is relevant at a given point only if there is no lexical binding for the identifier. The phrase “compile-time environment” refers to the combined lexical and top-level environments; identifiers looked up in the compile-time environment are first looked for in the lexical environment, and if no binding exists there, then in the top-level environment.</p>
+
+<p>Within the scope of a lexical binding for an identifier x, the expander replaces all occurrences of <i>x</i> with a new identifier. This new identifier contains the original name of the identifier, a unique generated name, and the same set of marks (described below) as <i>x</i>. The original name is retained in case the identifier is ultimately used as symbolic data, i.e., in case it eventually appears within a <b>quote</b> expression. The newly generated name is used to look up the identifier’s meaning in the compile-time environment. Thus, the lexical compile-time environment maps generated names to binding information.</p>
+
+<p>For efficiency, this substitution is actually done incrementally, not all at once, by creating a syntax object encapsulating the outermost form with an environment mapping the old identifiers to the corresponding new identifiers. Then, as the form is destructured and traversed by the expander and macro transformers (using <b>syntax-case</b>), the encapsulation is “pushed down” into the subforms and the pending substitutions are performed.</p>
+
+<p>In the case of lexical (<b>lambda</b>-bound) variables, the generated names become the formal parameter names of the generated <b>lambda</b> expression. For pattern-variables within <b>syntax-case</b> patterns, a <b>lambda</b> binding for each of the generated names is established within the fender and output expressions; these names are bound at run time to the corresponding pieces of the input. For a pattern variable followed by an ellipsis, the generated name is bound to a list of the corresponding forms; for two levels of ellipses, a list of lists of the corresponding forms; and so on. For <b>let-syntax</b> and <b>letrec-syntax</b> forms, the generated name is not bound at run time, but is used solely as a handle for the binding in the compile-time environment.</p>
+
+<p>When an identifier reference is encountered by the expander, the expander’s action differs depending upon the context of the reference and the visible compile-time binding of the identifier.</p>
+
+<p>If the identifier occurs in the keyword position of a form that might be a macro call and it is found to be a macro keyword in the compile-time environment, the associated transformer is invoked as described below.</p>
+
+<p>If an identifier encountered by the expander is an apparent variable reference and it is bound as a lexical variable (<b>lambda</b>-bound variable), it is converted into a reference to the corresponding generated name. If it is not bound anywhere, it is assumed to be a reference to a top-level binding and is thus expanded into its original name. An apparent variable reference to any other type of identifier (macro keyword or pattern variable) is an invalid reference, which is signaled by the expander.</p>
+
+<p>If an identifier appears within a <b>syntax</b> form and it is bound as a pattern variable in the compile-time environment, the generated name and the nesting level are used by the expander to generate code that inserts the corresponding subforms into the output. Any other identifier appearing within a <b>syntax</b> form is inserted into the output unchanged.</p>
+
+<p>If an identifier appears within a <b>quote</b> form, it is stripped down to the original name.</p>
+
+<p>A macro call is handled as follows. First, a new “mark” is created. Each mark is distinguishable from other marks, but it is otherwise unimportant how marks are represented. We currently represent marks as integers. This mark is attached to each identifier in the input to the macro, and the resulting expression is passed to the transformer. Identifiers in the output from the transformer are similarly marked, except that identifiers to which the mark is already attached are stripped of the mark. In this way, the mark “sticks” only to identifiers introduced by the transformer; it does not stick to identifiers that the transformer copies from the input into the output. As with the substitution of old identifiers with new identifiers described above, this marking is done incrementally for efficiency; marks to be applied are recorded along with substitutions to be performed in each syntax object.</p>
+
+<p>The marks are used to inhibit substitution of macro-introduced lexical identifiers that should not be captured by bindings in the context of the call nor (if bound by the output of the macro) capture references in the input to the call. If the marks on an occurrence of an identifier within the scope of a lexical binding construct are not the same as the marks on the bound identifier, the occurrence is left alone even if the identifiers are otherwise equivalent.</p>
+<p>For example, consider the expansion of:</p>
+<img src="im/74.png" width="100%" />
+<p>using the two-subexpression version of <b>or</b> below:</p>
+<img src="im/75.png" width="100%" />
+<p>The expression above should evaluate to the top-level value of the variable <i>t</i>. As the expansion unfolds, observe how substitution and marking prevent the binding for <b>if</b> in the source expression from interfering with the macro’s use of <b>if</b> and the macro’s binding for <i>t</i> from interfering with the source expression’s reference to <i>t</i>.</p>
+<p>For simplicity, we assume that <b>let</b> is handled directly by the expander; with a little more tedium we could first expand it into the corresponding <b>lambda</b> application. We also assume that identifier substitutions and marks are applied immediately rather than incrementally.</p>
+<p>For purposes of this discussion, identifiers are shown as ordered triples of the form:</p>
+<img src="im/76.png" width="100%" />
+<p>The original input is thus:</p>
+<img src="im/77.png" width="100%" />
+<p>On the first step, since <b>let</b> has no other binding but its original binding in the top-level environment, the bound variable from the outer <b>let</b> expression is replaced with the generated name <i>g0001</i>, and the occurrence of the identifier within the scope of the <b>let</b> expression is replaced with a new identifier that contains both the generated and original names:</p>
+<img src="im/78.png" width="100%" />
+<p>Existence of this binding for <i>g0001</i> is also recorded in the lexical compile-time environment. Next, the transformer for <b>or2</b> is invoked, with identifiers in its input marked by mark <i>m</i><sub>1</sub> :</p>
+<img src="im/79.png" width="100%" />
+<p>The transformer for <b>or2</b> produces:</p>
+<img src="im/80.png" width="100%" />
+<p>Next, within the output from the <b>or2</b> transformer, identifiers not marked with <i>m</i><sub>1</sub> are so marked while the <i>m</i><sub>1</sub> mark is removed from the others (since identical marks cancel).</p>
+<img src="im/81.png" width="100%" />
+<p>Only the current name is relevant when an identifier’s binding is determined in the compile-time environment, so even though the mark <i>m</i><sub>1</sub> has been attached to the identifier <b>let</b>, it still resolves to the top-level definition for <b>let</b>. Therefore, the bound identifier is replaced with a generated name and occurrences of the identifier (with the same current name and marks) are replaced with a new identifier within the scope of the <b>let</b> expression:</p>
+<img src="im/82.png" width="100%" />
+<p>Existence of this binding for <i>g0002</i> is also recorded in the lexical compile-time environment, which still also holds a record of the binding for <i>g0001</i>.</p>
+
+<p>Since <i>g0001</i> is recorded as a lexically bound variable in the compile-time environment, the occurrence of (if, g0001, {}) expands into a reference to <i>g0001</i>. Thus, the output expression so far consists of the following:</p>
+<img src="im/83.png" width="100%" />
+<p>with the last line as yet unexpanded. Since the current name of the identifier (if, if, {<i>m</i><sub>1</sub> }) is <b>if</b>, the last line is recognized as an <b>if</b> expression:</p>
+<img src="im/84.png" width="100%" />
+<p>Only the three variable references within this <b>if</b> expression remain to be expanded. The current name, <i>g0002</i>, for the first and second of these is recorded as a lexical variable in the compile-time environment so both simply expand into <i>g0002</i>. The current name for the third is <i>t</i>, which has no binding in the lexical compile-time environment; therefore it expands into a top-level reference to <i>t</i>. Thus, the final output from the expander is:</p>
+<img src="im/85.png" width="100%" />
+<p>Responsibility for “pushing down” the substitutions and markings in the actual implementation is given to <b>syntax-case</b> expressions. As a <b>syntax-case</b> matches the input against a pattern, any syntax objects that must be destructured are destructured only as far as necessary to perform the match, and the substitutions and markings are transferred to the subexpressions of the destructured form. If the match is successful, the resulting values are bound to the pattern variables (actually, to the corresponding generated names) within the fender and output expressions. Subforms of <b>syntax</b> expressions within the scope of these pattern variables are rebuilt as necessary to insert these values. All substitutions and marks attached to pieces of the output from <b>syntax</b> are retained so that, when they are subsequently inserted into the output of a macro, identifiers within these pieces refer to the bindings visible where they first appeared. The expander strips all such information from <b>quote</b> forms (using the equivalent of <i>syntax-object >datum</i>), since quoted symbols are used as ordinary symbolic data.</p>
+
+<p>Two identifiers are <i>bound-identifier=?</i> if and only if they have the same current name (which implies they have the same original name) and the same marks. Two identifiers are <i>free-identifier=?</i> if and only if they have the same current name. This is a reflection of the compile-time environment lookup and identifier replacement rules: only the current name is relevant for determining an identifier’s binding, while both the current name and the marks must agree for an identifier to be replaced within the scope of a lexical binding construct.</p>
+
+<p>Two identifiers that are <i>bound-identifier=?</i> may not be <i>eqv?</i>, since other information (including source annotations) may be present in the identifier structure. Thus, it is rarely useful to use <i>eqv?</i> on identifiers.</p>
+
+<p>The implementation of <i>implicit-identifier</i> is straightforward, although it does place constraints on the implementation that otherwise would not be necessary. Specifically, all identifier substitutions required by binding forms visible to an occurrence of an identifier must be recorded with the identifier, including those substitutions that do not affect the identifier due to a difference in current name or marks. An implicit identifier is formed by copying the substitutions and marks from the template identifier into a new identifier. The original name of the new identifier is given by the second argument to <i>implicit-identifier</i>, and the current name is determined by the substitutions and marks recorded with the template identifier.</p>
+
+<h3>5 Acknowledgements</h3>
+
+<p>This report is dedicated to my good friend and colleague, Bob Hieb, who was killed along with his eleven-year old daughter Iva in a tragic car accident near their home on April 30, 1992. Bob and I worked on the macro system described herein for several years, and many of the most important concepts and algorithms were developed by Bob, who had adopted it as his dissertation project.</p>
+
+<p>I would like to thank Carl Bruggeman for his detailed and thoughtful comments on drafts of this report, and also for the use of his “Scheme TeXer,” with which the examples contained within this report were formatted. I would like to thank David Eby, George Springer, Dan Friedman, and David Moon as well for their helpful comments.</p>
+
+<h3>References</h3>
+
+<p>[1] William Clinger and Jonathan Rees. Macros that work. In Conference Record of the Eighteenth Annual ACM Symposium on Principles of Programming Languages, pages 155–162, January 1991.</p>
+
+<p>[2] William Clinger, Jonathan A. Rees, et al. The revised4 report on the algorithmic language Scheme. LISP Pointers, 4(3), 1991.</p>
+
+<p>[3] R. Kent Dybvig. The Scheme Programming Language. Prentice-Hall, 1987.</p>
+
+<p>[4] Robert Hieb, R. Kent Dybvig, and Carl Bruggeman. Syntactic abstraction in scheme. Technical Report 355, Indiana Computer Science Department, June 1992.</p>
+
+<p>[5] Eugene Kohlbecker. Syntactic Extensions in the Programming Language Lisp. PhD thesis, Indiana University, Bloomington, August 1986. </p>
+
+<p>[6] Eugene Kohlbecker, Daniel P. Friedman, Matthias Felleisen, and Bruce Duba. Hygienic macro expansion. In Proceedings of the 1986 ACM Conference on Lisp and Functional Programming, pages 151–161, 1986.</p>
+</body>
+</html>
